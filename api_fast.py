@@ -1,298 +1,171 @@
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, Field, validator
+# api_fast.py
+from fastapi import FastAPI, HTTPException, status, Depends
+from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import date
-import sqlite3
-from contextlib import contextmanager
+from database import Database
 
+# Inicializar o banco de dados
+db = Database()
+
+# Inicializar FastAPI
 app = FastAPI(
-    title="API de Livros",
-    description="API para gerenciamento de livros com FastAPI e SQLite",
+    title="Biblioteca API",
+    description="API para gerenciamento de livros da biblioteca",
     version="1.0.0"
 )
 
-# Configuração do banco de dados - biblioteca.db
-DATABASE = "biblioteca.db"
-
-def criar_tabela():
-    """Cria a tabela livros se não existir"""
-    with sqlite3.connect(DATABASE) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS livros (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                titulo TEXT NOT NULL,
-                autor TEXT NOT NULL,
-                ano_publicacao INTEGER,
-                disponivel INTEGER NOT NULL CHECK(disponivel IN (0,1))
-            )
-        """)
-        conn.commit()
-
-# Criar tabela ao iniciar
-criar_tabela()
-
-# Context manager para conexão com banco de dados
-@contextmanager
-def get_db_connection():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row  # Para retornar dicionários
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-# Modelos Pydantic para validação
-
-class LivroBase(BaseModel):
-    titulo: str = Field(..., min_length=1, max_length=200, example="O Senhor dos Anéis")
-    autor: str = Field(..., min_length=1, max_length=100, example="J.R.R. Tolkien")
-    ano_publicacao: Optional[int] = Field(None, ge=1000, le=date.today().year, example=1954)
+# Modelos Pydantic
+class LivroCreate(BaseModel):
+    titulo: str = Field(..., min_length=1, max_length=200, example="Dom Casmurro")
+    autor: str = Field(..., min_length=1, max_length=100, example="Machado de Assis")
+    ano_publicacao: int = Field(..., ge=1000, le=2100, example=1899)
     disponivel: bool = Field(default=True, example=True)
-    
-    @validator('ano_publicacao')
-    def validar_ano_publicacao(cls, v):
-        if v is not None and (v < 1000 or v > date.today().year):
-            raise ValueError(f"Ano de publicação deve estar entre 1000 e {date.today().year}")
-        return v
-
-class LivroCreate(LivroBase):
-    pass
 
 class LivroUpdate(BaseModel):
-    titulo: Optional[str] = Field(None, min_length=1, max_length=200, example="O Senhor dos Anéis")
-    autor: Optional[str] = Field(None, min_length=1, max_length=100, example="J.R.R. Tolkien")
-    ano_publicacao: Optional[int] = Field(None, ge=1000, le=date.today().year, example=1954)
+    titulo: Optional[str] = Field(None, min_length=1, max_length=200, example="Dom Casmurro")
+    autor: Optional[str] = Field(None, min_length=1, max_length=100, example="Machado de Assis")
+    ano_publicacao: Optional[int] = Field(None, ge=1000, le=2100, example=1899)
     disponivel: Optional[bool] = Field(None, example=True)
-    
-    @validator('ano_publicacao')
-    def validar_ano_publicacao(cls, v):
-        if v is not None and (v < 1000 or v > date.today().year):
-            raise ValueError(f"Ano de publicação deve estar entre 1000 e {date.today().year}")
-        return v
 
-class Livro(LivroBase):
+class LivroResponse(BaseModel):
     id: int
+    titulo: str
+    autor: str
+    ano_publicacao: int
+    disponivel: bool
     
     class Config:
         from_attributes = True
 
-# Funções auxiliares do banco de dados
-def livro_from_row(row):
-    """Converte uma linha do banco de dados para um dicionário de livro"""
-    return {
-        "id": row["id"],
-        "titulo": row["titulo"],
-        "autor": row["autor"],
-        "ano_publicacao": row["ano_publicacao"],
-        "disponivel": bool(row["disponivel"])
-    }
-
 # Endpoints
-
-@app.get("/", tags=["Raiz"])
-def root():
-    """Endpoint raiz da API"""
+@app.get("/")
+async def root():
+    """Endpoint raiz"""
     return {
-        "mensagem": "Bem-vindo à API de Livros da Biblioteca",
-        "documentacao": "/docs",
-        "endpoints": {
-            "GET /livros": "Listar todos os livros",
-            "GET /livros/{id}": "Obter livro por ID",
-            "POST /livros": "Adicionar novo livro",
-            "PUT /livros/{id}": "Atualizar livro existente",
-            "DELETE /livros/{id}": "Excluir livro",
-            "GET /status": "Status da biblioteca"
-        },
-        "banco_dados": f"SQLite ({DATABASE})"
+        "message": "Bem-vindo à API da Biblioteca",
+        "docs": "/docs",
+        "redoc": "/redoc"
     }
 
-@app.get("/livros", response_model=List[Livro], tags=["Livros"])
-def listar_livros():
-    """Lista todos os livros cadastrados"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM livros ORDER BY id")
-        livros = [livro_from_row(row) for row in cursor.fetchall()]
+@app.get("/livros", response_model=List[LivroResponse], status_code=status.HTTP_200_OK)
+async def listar_livros():
+    """Lista todos os livros"""
+    livros = db.get_all_livros()
     return livros
 
-@app.get("/livros/{id}", response_model=Livro, tags=["Livros"])
-def obter_livro(id: int):
+@app.get("/livros/{livro_id}", response_model=LivroResponse, status_code=status.HTTP_200_OK)
+async def obter_livro(livro_id: int):
     """Obtém um livro específico pelo ID"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM livros WHERE id = ?", (id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Livro com ID {id} não encontrado"
-            )
-        
-        return livro_from_row(row)
-
-@app.post("/livros", response_model=Livro, status_code=status.HTTP_201_CREATED, tags=["Livros"])
-def criar_livro(livro: LivroCreate):
-    """Adiciona um novo livro à biblioteca"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            INSERT INTO livros (titulo, autor, ano_publicacao, disponivel)
-            VALUES (?, ?, ?, ?)
-        """, (
-            livro.titulo,
-            livro.autor,
-            livro.ano_publicacao,
-            1 if livro.disponivel else 0
-        ))
-        conn.commit()
-        
-        livro_id = cursor.lastrowid
-        
-        # Recupera o livro recém-criado
-        cursor = conn.execute("SELECT * FROM livros WHERE id = ?", (livro_id,))
-        row = cursor.fetchone()
-        
-        return livro_from_row(row)
-
-@app.put("/livros/{id}", response_model=Livro, tags=["Livros"])
-def atualizar_livro(id: int, livro_update: LivroUpdate):
-    """Atualiza um livro existente na biblioteca"""
-    # Primeiro verifica se o livro existe
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM livros WHERE id = ?", (id,))
-        if not cursor.fetchone():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Livro com ID {id} não encontrado na biblioteca"
-            )
-    
-    # Prepara os campos para atualização
-    campos = []
-    valores = []
-    
-    if livro_update.titulo is not None:
-        campos.append("titulo = ?")
-        valores.append(livro_update.titulo)
-    
-    if livro_update.autor is not None:
-        campos.append("autor = ?")
-        valores.append(livro_update.autor)
-    
-    if livro_update.ano_publicacao is not None:
-        campos.append("ano_publicacao = ?")
-        valores.append(livro_update.ano_publicacao)
-    
-    if livro_update.disponivel is not None:
-        campos.append("disponivel = ?")
-        valores.append(1 if livro_update.disponivel else 0)
-    
-    # Se não há campos para atualizar, retorna erro
-    if not campos:
+    livro = db.get_livro_by_id(livro_id)
+    if not livro:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Nenhum campo fornecido para atualização"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Livro com ID {livro_id} não encontrado"
+        )
+    return livro
+
+@app.post("/livros", response_model=LivroResponse, status_code=status.HTTP_201_CREATED)
+async def criar_livro(livro: LivroCreate):
+    """Adiciona um novo livro"""
+    livro_id = db.create_livro(
+        titulo=livro.titulo,
+        autor=livro.autor,
+        ano_publicacao=livro.ano_publicacao,
+        disponivel=livro.disponivel
+    )
+    
+    novo_livro = db.get_livro_by_id(livro_id)
+    return novo_livro
+
+@app.put("/livros/{livro_id}", response_model=LivroResponse, status_code=status.HTTP_200_OK)
+async def atualizar_livro(livro_id: int, livro_update: LivroUpdate):
+    """Atualiza um livro existente"""
+    # Verificar se o livro existe
+    if not db.livro_exists(livro_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Livro com ID {livro_id} não encontrado"
         )
     
-    # Adiciona o ID no final dos valores
-    valores.append(id)
+    # Filtrar campos que não são None
+    update_data = livro_update.model_dump(exclude_unset=True)
     
-    # Executa a atualização
-    with get_db_connection() as conn:
-        query = f"UPDATE livros SET {', '.join(campos)} WHERE id = ?"
-        conn.execute(query, valores)
-        conn.commit()
-        
-        # Recupera o livro atualizado
-        cursor = conn.execute("SELECT * FROM livros WHERE id = ?", (id,))
-        row = cursor.fetchone()
-        
-        return livro_from_row(row)
-
-@app.delete("/livros/{id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Livros"])
-def excluir_livro(id: int):
-    """Exclui um livro da biblioteca"""
-    with get_db_connection() as conn:
-        # Verifica se o livro existe
-        cursor = conn.execute("SELECT id FROM livros WHERE id = ?", (id,))
-        if not cursor.fetchone():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Livro com ID {id} não encontrado na biblioteca"
-            )
-        
-        # Exclui o livro
-        conn.execute("DELETE FROM livros WHERE id = ?", (id,))
-        conn.commit()
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nenhum dado fornecido para atualização"
+        )
     
-    return None
+    # Atualizar o livro
+    success = db.update_livro(livro_id, **update_data)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Erro ao atualizar o livro"
+        )
+    
+    # Retornar o livro atualizado
+    livro_atualizado = db.get_livro_by_id(livro_id)
+    return livro_atualizado
 
-# Popula o banco de dados com alguns exemplos iniciais se estiver vazio
+@app.delete("/livros/{livro_id}", status_code=status.HTTP_200_OK)
+async def deletar_livro(livro_id: int):
+    """Exclui um livro pelo ID"""
+    # Verificar se o livro existe
+    if not db.livro_exists(livro_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Livro com ID {livro_id} não encontrado"
+        )
+    
+    # Excluir o livro
+    success = db.delete_livro(livro_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Erro ao excluir o livro"
+        )
+    
+    return {"message": f"Livro com ID {livro_id} excluído com sucesso"}
+
+# Adicionar alguns livros de exemplo na inicialização
 @app.on_event("startup")
-def popular_banco():
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT COUNT(*) as count FROM livros")
-        count = cursor.fetchone()["count"]
-        
-        if count == 0:
-            exemplos = [
-                ("Dom Casmurro", "Machado de Assis", 1899, 1),
-                ("1984", "George Orwell", 1949, 1),
-                ("A Culpa é das Estrelas", "John Green", 2012, 0),
-                ("Harry Potter e a Pedra Filosofal", "J.K. Rowling", 1997, 1),
-                ("O Pequeno Príncipe", "Antoine de Saint-Exupéry", 1943, 1),
-                ("Orgulho e Preconceito", "Jane Austen", 1813, 1),
-                ("Crime e Castigo", "Fiódor Dostoiévski", 1866, 0),
-                ("Cem Anos de Solidão", "Gabriel García Márquez", 1967, 1)
-            ]
-            
-            conn.executemany("""
-                INSERT INTO livros (titulo, autor, ano_publicacao, disponivel)
-                VALUES (?, ?, ?, ?)
-            """, exemplos)
-            conn.commit()
-            print(f"✅ Banco de dados '{DATABASE}' criado com {len(exemplos)} livros iniciais.")
-
-# Endpoint adicional para informações do banco de dados
-@app.get("/status", tags=["Biblioteca"])
-def status_biblioteca():
-    """Retorna informações sobre o status da biblioteca"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT COUNT(*) as total FROM livros")
-        total = cursor.fetchone()["total"]
-        
-        cursor = conn.execute("SELECT COUNT(*) as disponiveis FROM livros WHERE disponivel = 1")
-        disponiveis = cursor.fetchone()["disponiveis"]
-        
-        cursor = conn.execute("SELECT COUNT(*) as indisponiveis FROM livros WHERE disponivel = 0")
-        indisponiveis = cursor.fetchone()["disponiveis"]
-        
-        # Pega os livros mais recentes
-        cursor = conn.execute("SELECT * FROM livros ORDER BY id DESC LIMIT 5")
-        recentes = [livro_from_row(row) for row in cursor.fetchall()]
-        
-    return {
-        "biblioteca": DATABASE,
-        "total_livros": total,
-        "livros_disponiveis": disponiveis,
-        "livros_indisponiveis": indisponiveis,
-        "livros_recentes": recentes
-    }
-
-# Novo endpoint para buscar livros por título ou autor
-@app.get("/livros/buscar/{termo}", response_model=List[Livro], tags=["Livros"])
-def buscar_livros(termo: str):
-    """Busca livros por título ou autor"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT * FROM livros 
-            WHERE titulo LIKE ? OR autor LIKE ?
-            ORDER BY titulo
-        """, (f"%{termo}%", f"%{termo}%"))
-        
-        livros = [livro_from_row(row) for row in cursor.fetchall()]
-        
-        if not livros:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Nenhum livro encontrado com '{termo}'"
+async def startup_event():
+    """Adiciona alguns livros de exemplo quando a API inicia"""
+    try:
+        # Verificar se já existem livros
+        livros = db.get_all_livros()
+        if len(livros) == 0:
+            # Adicionar livros de exemplo
+            db.create_livro(
+                titulo="Dom Casmurro",
+                autor="Machado de Assis",
+                ano_publicacao=1899,
+                disponivel=True
             )
-        
-        return livros
+            db.create_livro(
+                titulo="1984",
+                autor="George Orwell",
+                ano_publicacao=1949,
+                disponivel=False
+            )
+            db.create_livro(
+                titulo="O Senhor dos Anéis",
+                autor="J.R.R. Tolkien",
+                ano_publicacao=1954,
+                disponivel=True
+            )
+            print("Livros de exemplo adicionados com sucesso!")
+    except Exception as e:
+        print(f"Erro ao adicionar livros de exemplo: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "api_fast:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
